@@ -1,0 +1,21 @@
+{
+  "name": "staking-v3",
+  "dependencies": {
+    "@nomiclabs/hardhat-ethers": "^2.0.2",
+    "@openzeppelin/contracts": "^4.2.0",
+    "ethers": "^5.4.1",
+    "hardhat": "^2.4.3"
+  },
+  "devDependencies": {
+    "@typechain/ethers-v5": "^7.0.1",
+    "@typechain/hardhat": "^2.1.2",
+    "eslint": "^7.31.0",
+    "eslint-config-semistandard": "^16.0.0",
+    "eslint-config-standard": "^16.0.3",
+    "eslint-plugin-import": "^2.23.4",
+    "eslint-plugin-node": "^11.1.0",
+    "eslint-plugin-promise": "^5.1.0",
+    "eslint-plugin-standard": "^5.0.0",
+    "typechain": "^5.1.1"
+  }
+}
