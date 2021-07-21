@@ -10,9 +10,10 @@ contract StakingPool is ERC20 {
   // RPT = reward per token
 
   struct Bucket {
-    uint unstakeAmount;
-    uint unrewardAmount;
+    uint rewardsToReduce;
     uint rptCumulativeSnapshot;
+    uint sharesToUnstake;
+    uint nxmUnstaked;
   }
 
   struct Staker {
@@ -23,25 +24,31 @@ contract StakingPool is ERC20 {
   mapping(uint => Bucket) public buckets;
   mapping(address => Staker) public stakers;
 
-  uint public stakedAmount;
+  // total nxm reward amount to be distributed (without already distributed amount)
+  uint public rewardAmount;
+
+  // reward to be distributed in the current bucket
+  uint public currentBucketReward;
+
+  // currently unstaked nxm
   uint public unstakedAmount;
-  uint public rewardPerBucket;
+
   uint public rptCumulative;
   uint public rptUpdateTime;
   uint public lastCrossedBucket;
 
-  ERC20 public immutable lpToken;
+  ERC20 public immutable nxm;
   uint public immutable REWARDS_PRECISION;
   uint public constant BUCKET_SIZE = 7 days;
 
   constructor (
-    address _lpToken,
+    address _nxm,
     string memory name_,
     string memory symbol_
   ) ERC20(name_, symbol_) {
 
-    lpToken = ERC20(_lpToken);
-    REWARDS_PRECISION = 10 ** ERC20(_lpToken).decimals();
+    nxm = ERC20(_nxm);
+    REWARDS_PRECISION = 10 ** ERC20(_nxm).decimals();
 
     rptUpdateTime = block.timestamp;
     lastCrossedBucket = bucketIndex(block.timestamp);
@@ -52,10 +59,10 @@ contract StakingPool is ERC20 {
     return timestamp / BUCKET_SIZE;
   }
 
-  function crossBuckets() internal returns (uint targetBucket) {
+  function crossBuckets() internal returns (uint currentBucket) {
 
-    uint currentBucket = lastCrossedBucket;
-    targetBucket = bucketIndex(block.timestamp);
+    currentBucket = lastCrossedBucket;
+    uint targetBucket = bucketIndex(block.timestamp);
 
     while (currentBucket != targetBucket) {
 
@@ -64,7 +71,8 @@ contract StakingPool is ERC20 {
       // calc rates since last update
       uint bucketCrossTime = currentBucket * BUCKET_SIZE;
       uint elapsed = bucketCrossTime - rptUpdateTime;
-      uint rptPerSecond = REWARDS_PRECISION * rewardPerBucket / BUCKET_SIZE / totalSupply();
+      // TODO: treat division by zero case
+      uint rptPerSecond = REWARDS_PRECISION * currentBucketReward / BUCKET_SIZE / totalSupply();
       uint rptSinceLastUpdate = rptPerSecond * elapsed;
 
       // update storage and store snapshot
@@ -74,13 +82,23 @@ contract StakingPool is ERC20 {
       rptUpdateTime = bucketCrossTime;
 
       // calc unstaked amount and burn unstaked shares
-      uint burnAmount = buckets[currentBucket].unstakeAmount;
-      rewardPerBucket = rewardPerBucket - buckets[currentBucket].unrewardAmount;
-      _burn(address(this), burnAmount);
+      uint sharesToUnstake = buckets[currentBucket].sharesToUnstake;
+      uint nxmBalance = nxm.balanceOf(address(this));
+      uint stakedNXM = nxmBalance - rewardAmount - unstakedAmount;
+      // TODO: treat division by zero case
+      uint nxmToUnstake = stakedNXM * sharesToUnstake / totalSupply();
+
+      buckets[currentBucket].nxmUnstaked = nxmToUnstake;
+      unstakedAmount = unstakedAmount + nxmToUnstake;
+
+      currentBucketReward = currentBucketReward - buckets[currentBucket].rewardsToReduce;
+      _burn(address(this), sharesToUnstake);
     }
   }
 
   function buyCover(uint amount, uint period) external {
+
+    crossBuckets();
 
     uint numBuckets = period / BUCKET_SIZE + 1;
 
@@ -88,19 +106,25 @@ contract StakingPool is ERC20 {
 
   function deposit(uint amount) external {
 
-    uint balance = lpToken.balanceOf(address(this));
+    crossBuckets();
+
+    uint nxmBalance = nxm.balanceOf(address(this));
     uint shares = balanceOf(msg.sender);
     uint supply = totalSupply();
 
-    uint elapsed = block.timestamp - rptUpdateTime;
-    uint currentRptPerSecond = rewardPerBucket / BUCKET_SIZE / supply;
-    uint rptSinceLastUpdate = currentRptPerSecond * elapsed;
-    uint currentRptCumulative = rptCumulative + rptSinceLastUpdate;
+    uint currentRptCumulative = rptCumulative;
+
+    if (supply != 0) {
+      uint currentRptPerSecond = currentBucketReward / BUCKET_SIZE / supply;
+      uint elapsed = block.timestamp - rptUpdateTime;
+      uint rptSinceLastUpdate = currentRptPerSecond * elapsed;
+      currentRptCumulative = currentRptCumulative + rptSinceLastUpdate;
+    }
 
     rptCumulative = currentRptCumulative;
     rptUpdateTime = block.timestamp;
 
-    lpToken.transferFrom(msg.sender, address(this), amount);
+    nxm.transferFrom(msg.sender, address(this), amount);
 
     Staker storage staker = stakers[msg.sender];
     uint stakerLastRptCumulative = staker.rptCumulativePaid;
@@ -113,7 +137,7 @@ contract StakingPool is ERC20 {
       staker.rptCumulativePaid = currentRptCumulative;
     }
 
-    uint newShares = supply == 0 ? amount : (amount / balance * supply);
+    uint newShares = supply == 0 ? amount : (amount / nxmBalance * supply);
     _mint(msg.sender, newShares);
   }
 
