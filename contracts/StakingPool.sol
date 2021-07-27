@@ -25,7 +25,7 @@ contract StakingPool is ERC20 {
   mapping(address => Staker) public stakers;
 
   // total nxm reward amount to be distributed (without already distributed amount)
-  uint public rewardAmount;
+  uint public pendingRewards;
 
   // reward to be distributed in the current bucket
   uint public currentBucketReward;
@@ -34,7 +34,7 @@ contract StakingPool is ERC20 {
   uint public unstakedAmount;
 
   uint public rptCumulative;
-  uint public rptUpdateTime;
+  uint public rptLastUpdateTime;
   uint public lastCrossedBucket;
 
   ERC20 public immutable nxm;
@@ -43,26 +43,36 @@ contract StakingPool is ERC20 {
 
   constructor (
     address _nxm,
-    string memory name_,
-    string memory symbol_
-  ) ERC20(name_, symbol_) {
+    string memory _name,
+    string memory _symbol
+  ) ERC20(_name, _symbol) {
 
     nxm = ERC20(_nxm);
     REWARDS_PRECISION = 10 ** ERC20(_nxm).decimals();
 
-    rptUpdateTime = block.timestamp;
-    lastCrossedBucket = bucketIndex(block.timestamp);
-    console.log("current bucket: %s", lastCrossedBucket);
+    rptLastUpdateTime = block.timestamp;
+    lastCrossedBucket = _bucketIndex(block.timestamp);
   }
 
-  function bucketIndex(uint timestamp) public pure returns (uint) {
+  function bucketIndex(uint timestamp) external pure returns (uint) {
+    return _bucketIndex(timestamp);
+  }
+
+  function _bucketIndex(uint timestamp) internal pure returns (uint) {
     return timestamp / BUCKET_SIZE;
   }
 
-  function crossBuckets() internal returns (uint currentBucket) {
+  function updateRewards() internal {
 
-    currentBucket = lastCrossedBucket;
-    uint targetBucket = bucketIndex(block.timestamp);
+    uint currentBucket = lastCrossedBucket;
+    uint targetBucket = _bucketIndex(block.timestamp);
+
+    // cheaper to have them on stack
+    uint _rptCumulative = rptCumulative;
+    uint _rptLastUpdateTime = rptLastUpdateTime;
+    uint _currentBucketReward = currentBucketReward;
+    uint _pendingRewards = pendingRewards;
+    uint _unstakedAmount = unstakedAmount;
 
     while (currentBucket != targetBucket) {
 
@@ -70,74 +80,112 @@ contract StakingPool is ERC20 {
 
       // calc rates since last update
       uint bucketCrossTime = currentBucket * BUCKET_SIZE;
-      uint elapsed = bucketCrossTime - rptUpdateTime;
-      // TODO: treat division by zero case
-      uint rptPerSecond = REWARDS_PRECISION * currentBucketReward / BUCKET_SIZE / totalSupply();
-      uint rptSinceLastUpdate = rptPerSecond * elapsed;
+      uint supply = totalSupply();
 
-      // update storage and store snapshot
-      uint newRptCumulative = rptCumulative + rptSinceLastUpdate;
-      buckets[currentBucket].rptCumulativeSnapshot = newRptCumulative;
-      rptCumulative = newRptCumulative;
-      rptUpdateTime = bucketCrossTime;
+      // TODO: rewards streamed while there are no stakers may get stuck forever, unsure if this can happen though
 
-      // calc unstaked amount and burn unstaked shares
+      if (supply == 0) {
+
+        _currentBucketReward -= buckets[currentBucket].rewardsToReduce;
+        _rptLastUpdateTime = bucketCrossTime;
+
+        if (_rptCumulative != 0) {
+          buckets[currentBucket].rptCumulativeSnapshot = _rptCumulative;
+        }
+
+        continue;
+      }
+
+      {
+        // rewards since last update
+        uint rptPerSecond = REWARDS_PRECISION * _currentBucketReward / supply / BUCKET_SIZE;
+        uint elapsed = bucketCrossTime - _rptLastUpdateTime;
+        uint rptSinceLastUpdate = rptPerSecond * elapsed;
+
+        _rptLastUpdateTime = bucketCrossTime;
+        _rptCumulative += rptSinceLastUpdate;
+        buckets[currentBucket].rptCumulativeSnapshot = _rptCumulative;
+      }
+
       uint sharesToUnstake = buckets[currentBucket].sharesToUnstake;
-      uint nxmBalance = nxm.balanceOf(address(this));
-      uint stakedNXM = nxmBalance - rewardAmount - unstakedAmount;
-      // TODO: treat division by zero case
-      uint nxmToUnstake = stakedNXM * sharesToUnstake / totalSupply();
 
-      buckets[currentBucket].nxmUnstaked = nxmToUnstake;
-      unstakedAmount = unstakedAmount + nxmToUnstake;
+      if (sharesToUnstake != 0) {
 
-      currentBucketReward = currentBucketReward - buckets[currentBucket].rewardsToReduce;
-      _burn(address(this), sharesToUnstake);
+        // calc unstaked amount and burn unstaked shares
+        uint nxmBalance = nxm.balanceOf(address(this));
+        uint stakedNXM = nxmBalance - _pendingRewards - _unstakedAmount;
+        uint nxmToUnstake = sharesToUnstake * stakedNXM / supply;
+
+        _burn(address(this), sharesToUnstake);
+        _unstakedAmount += nxmToUnstake;
+        buckets[currentBucket].nxmUnstaked = nxmToUnstake;
+      }
+
+      _currentBucketReward -= buckets[currentBucket].rewardsToReduce;
     }
+
+    uint supply = totalSupply();
+
+    // calc rewards since bucket cross time till now
+    if (supply != 0) {
+      uint rptPerSecond = REWARDS_PRECISION * _currentBucketReward / supply / BUCKET_SIZE;
+      uint elapsed = block.timestamp - _rptLastUpdateTime;
+      uint rptSinceLastUpdate = rptPerSecond * elapsed;
+      _rptLastUpdateTime = block.timestamp;
+      _rptCumulative += rptSinceLastUpdate;
+    }
+
+    lastCrossedBucket = currentBucket;
+    rptCumulative = _rptCumulative;
+    rptLastUpdateTime = _rptLastUpdateTime;
+    currentBucketReward = _currentBucketReward;
+    unstakedAmount = _unstakedAmount;
+    pendingRewards = _pendingRewards;
   }
 
-  function buyCover(uint amount, uint period) external {
+  error MinPeriodNotMet(uint requestedPeriod);
 
-    crossBuckets();
+  function buyCover(uint coveredAmount, uint premium, uint period) external {
 
+    updateRewards();
+
+    require(period >= 30 days);
+
+    // TODO: current bucket rewards must be partial
+    uint currentBucket = _bucketIndex(block.timestamp);
     uint numBuckets = period / BUCKET_SIZE + 1;
+    uint amountPerBucket = premium / numBuckets;
 
+    nxm.transferFrom(msg.sender, address(this), premium);
+
+    pendingRewards += premium;
+    currentBucketReward += amountPerBucket;
+    buckets[currentBucket + numBuckets].rewardsToReduce = amountPerBucket;
   }
 
   function deposit(uint amount) external {
 
-    crossBuckets();
+    updateRewards();
 
     uint nxmBalance = nxm.balanceOf(address(this));
-    uint shares = balanceOf(msg.sender);
-    uint supply = totalSupply();
-
-    uint currentRptCumulative = rptCumulative;
-
-    if (supply != 0) {
-      uint currentRptPerSecond = currentBucketReward / BUCKET_SIZE / supply;
-      uint elapsed = block.timestamp - rptUpdateTime;
-      uint rptSinceLastUpdate = currentRptPerSecond * elapsed;
-      currentRptCumulative = currentRptCumulative + rptSinceLastUpdate;
-    }
-
-    rptCumulative = currentRptCumulative;
-    rptUpdateTime = block.timestamp;
-
+    uint stakedNXM = nxmBalance - pendingRewards - unstakedAmount;
     nxm.transferFrom(msg.sender, address(this), amount);
 
     Staker storage staker = stakers[msg.sender];
-    uint stakerLastRptCumulative = staker.rptCumulativePaid;
-    uint stakerEarned = staker.earned;
+    uint shares = balanceOf(msg.sender);
+    uint _rptCumulative = rptCumulative;
 
-    if (stakerLastRptCumulative != 0) {
-      uint rptDiff = currentRptCumulative - stakerLastRptCumulative;
-      uint newEarnings = rptDiff * shares;
-      staker.earned = stakerEarned + newEarnings;
-      staker.rptCumulativePaid = currentRptCumulative;
+    if (shares != 0) {
+      uint rptUnpaid = _rptCumulative - staker.rptCumulativePaid;
+      uint newEarnings = rptUnpaid * shares;
+      staker.earned += newEarnings;
     }
 
-    uint newShares = supply == 0 ? amount : (amount / nxmBalance * supply);
+    // snapshot rptCumulative at deposit time
+    staker.rptCumulativePaid = _rptCumulative;
+
+    uint supply = totalSupply();
+    uint newShares = supply == 0 ? amount : (amount / stakedNXM * supply);
     _mint(msg.sender, newShares);
   }
 
