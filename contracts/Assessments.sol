@@ -98,7 +98,7 @@ contract Assessments {
 
   mapping(uint104 => FraudResolution) public fraudResolutionOfClaim;
   mapping(uint104 => FraudResolution) public fraudResolutionOfIncident;
-	bytes32[] fraudMerkleRoots;
+  bytes32[] fraudMerkleRoots;
 
   Claim[] public claims;
   Incident[] public incidents;
@@ -159,23 +159,23 @@ contract Assessments {
     return voteEnd + PAYOUT_COOLDOWN_DAYS * 1 days;
   }
 
-	function _getPollState (Poll memory poll) internal pure returns (
+  function _getPollState (Poll memory poll) internal pure returns (
     uint112 accepted,
     uint112 denied,
     uint32 voteStart
-	) {
-		accepted = poll.accepted;
-		denied = poll.denied;
-		voteStart = poll.voteStart;
-	}
+  ) {
+    accepted = poll.accepted;
+    denied = poll.denied;
+    voteStart = poll.voteStart;
+  }
 
-	function _getPayoutImpactOfClaim (Claim memory claim) internal view returns (uint) {
-		return claim.details.amount;
-	}
+  function _getPayoutImpactOfClaim (Claim memory claim) internal view returns (uint) {
+    return claim.details.amount;
+  }
 
-	function _getPayoutImpactOfIncident (Incident memory incident) internal view returns (uint) {
-	 return incident.details.activeCoverAmount * INCIDENT_TOKEN_WEIGHT_PERC / 100;
-	}
+  function _getPayoutImpactOfIncident (Incident memory incident) internal view returns (uint) {
+   return incident.details.activeCoverAmount * INCIDENT_TOKEN_WEIGHT_PERC / 100;
+  }
 
   function getVotingPeriodEnd (EventType eventType, uint104 id) public view returns (uint32) {
     uint112 accepted;
@@ -185,13 +185,13 @@ contract Assessments {
 
     if (eventType == EventType.CLAIM) {
       Claim memory claim = claims[id];
-			(accepted, denied, voteStart) = _getPollState(claim.poll);
-			payoutImpact = _getPayoutImpactOfClaim(claim);
-		} else {
-			Incident memory incident = incidents[id];
-			(accepted, denied, voteStart) = _getPollState(incident.poll);
-			payoutImpact = _getPayoutImpactOfIncident(incident);
-		}
+      (accepted, denied, voteStart) = _getPollState(claim.poll);
+      payoutImpact = _getPayoutImpactOfClaim(claim);
+    } else {
+      Incident memory incident = incidents[id];
+      (accepted, denied, voteStart) = _getPollState(incident.poll);
+      payoutImpact = _getPayoutImpactOfIncident(incident);
+    }
 
     return _getVotingPeriodEnd(accepted, denied, voteStart, payoutImpact);
   }
@@ -361,111 +361,104 @@ contract Assessments {
     ));
   }
 
-    function redeem(address account, uint256 tokenId, bytes32[] calldata proof)
-    external
-    {
-        require(_verify(_leaf(account, tokenId), proof), "Invalid merkle proof");
-        _safeMint(account, tokenId);
-    }
-
   // [todo] This should only be called by governance
   function burnFraud (
-		address fraudulentAssessor,
-		uint voteBatchSize,
-		bytes32 root,
-		bytes32[] calldata proof
-	) public {
-		require(_verify(_leaf(account, tokenId), proof), "Invalid merkle proof");
-		uint32 blockTimestamp = _blockTimestamp();
-		Vote[] memory votes = votesOf[fraudulentAssessor];
-		Deposit storage deposit = depositOf[fraudulentAssessor];
-		uint processUntil;
-		if (voteBatchSize == 0 || deposit.voteRewardCursor + voteBatchSize >= votes.length) {
-			processUntil = votes.length;
-		} else {
-			processUntil = deposit.voteRewardCursor + voteBatchSize;
-		}
-		for (uint j = deposit.voteRewardCursor; j < processUntil; j++) {
-			Vote memory vote = votes[j];
+    address fraudulentAssessor,
+    uint voteBatchSize,
+    bytes32 root,
+    bytes32[] calldata proof
+  ) public {
+    require(_verify(_leaf(account, tokenId), proof), "Invalid merkle proof");
+    uint32 blockTimestamp = _blockTimestamp();
+    Vote[] memory votes = votesOf[fraudulentAssessor];
+    Deposit storage deposit = depositOf[fraudulentAssessor];
+    uint processUntil;
+    if (voteBatchSize == 0 || deposit.voteRewardCursor + voteBatchSize >= votes.length) {
+      processUntil = votes.length;
+    } else {
+      processUntil = deposit.voteRewardCursor + voteBatchSize;
+    }
+    for (uint j = deposit.voteRewardCursor; j < processUntil; j++) {
+      Vote memory vote = votes[j];
 
-			FraudResolution storage fraudResolution = vote.eventType == EventType.CLAIM
-				? fraudResolutionOfClaim[vote.eventId]
-				: fraudResolutionOfIncident[vote.eventId];
-			if (fraudResolution.exists) {
-				if (vote.verdict == true) {
-					fraudResolution.accepted -= vote.tokenWeight;
-				} else {
-					fraudResolution.denied -= vote.tokenWeight;
-				}
-			} else {
-				uint112 accepted;
-				uint112 denied;
-				uint32 voteStart;
-				uint payoutImpact;
-				if (vote.eventType == EventType.CLAIM) {
-					Claim memory claim = claims[vote.eventId];
-					if (claim.details.withdrawalLocked) {
-						// Once the payout is withdrawn the poll result is final
-						continue;
-					}
-					(accepted, denied, voteStart) = _getPollState(claim.poll);
-					payoutImpact = _getPayoutImpactOfClaim(claim);
-				} else {
-					Incident memory incident = incidents[vote.eventId];
-					(accepted, denied, voteStart) = _getPollState(incident.poll);
-					payoutImpact = _getPayoutImpactOfIncident(incident);
-				}
-				uint32 voteEnd = _getVotingPeriodEnd(accepted, denied, voteStart, payoutImpact);
-				if (_getEndOfCooldownPeriod(voteEnd) > blockTimestamp) {
-					// Once the payout is withdrawn the poll result is final
-					continue;
-				}
-				if (vote.verdict == true) {
-					accepted -= vote.tokenWeight;
-				} else {
-					denied -= vote.tokenWeight;
-				}
-				if (vote.eventType == EventType.CLAIM) {
-					fraudResolutionOfClaim[vote.eventId] = FraudResolution( accepted, denied, true);
-				} else {
-					fraudResolutionOfIncident[vote.eventId] = FraudResolution( accepted, denied, true);
-				}
-			}
-		}
-		// Deposit becomes 0 and accrued rewards are no longer withdrawable
-		//nxm.burnFrom(assessor, uint(deposit.amount));
-		deposit.amount = uint104(0);
-		deposit.voteRewardCursor = uint104(votes.length);
+      FraudResolution storage fraudResolution = vote.eventType == EventType.CLAIM
+        ? fraudResolutionOfClaim[vote.eventId]
+        : fraudResolutionOfIncident[vote.eventId];
+      if (fraudResolution.exists) {
+        if (vote.verdict == true) {
+          fraudResolution.accepted -= vote.tokenWeight;
+        } else {
+          fraudResolution.denied -= vote.tokenWeight;
+        }
+      } else {
+        uint112 accepted;
+        uint112 denied;
+        uint32 voteStart;
+        uint payoutImpact;
+        if (vote.eventType == EventType.CLAIM) {
+          Claim memory claim = claims[vote.eventId];
+          if (claim.details.withdrawalLocked) {
+            // Once the payout is withdrawn the poll result is final
+            continue;
+          }
+          (accepted, denied, voteStart) = _getPollState(claim.poll);
+          payoutImpact = _getPayoutImpactOfClaim(claim);
+        } else {
+          Incident memory incident = incidents[vote.eventId];
+          (accepted, denied, voteStart) = _getPollState(incident.poll);
+          payoutImpact = _getPayoutImpactOfIncident(incident);
+        }
+        uint32 voteEnd = _getVotingPeriodEnd(accepted, denied, voteStart, payoutImpact);
+        if (_getEndOfCooldownPeriod(voteEnd) > blockTimestamp) {
+          // Once the payout is withdrawn the poll result is final
+          continue;
+        }
+        if (vote.verdict == true) {
+          accepted -= vote.tokenWeight;
+        } else {
+          denied -= vote.tokenWeight;
+        }
+        if (vote.eventType == EventType.CLAIM) {
+          fraudResolutionOfClaim[vote.eventId] = FraudResolution( accepted, denied, true);
+        } else {
+          fraudResolutionOfIncident[vote.eventId] = FraudResolution( accepted, denied, true);
+        }
+      }
+    }
+    // Deposit becomes 0 and accrued rewards are no longer withdrawable
+    //nxm.burnFrom(assessor, uint(deposit.amount));
+    deposit.amount = uint104(0);
+    deposit.voteRewardCursor = uint104(votes.length);
   }
 
   // [todo] Make sure this operation is done with only one write since all params fit in one slot
   function updateUintParameters (UintParams[] calldata paramNames, uint[] calldata values) external {
-		for (uint i = 0; i < paramNames.length; i++) {
-			if (paramNames[i] == UintParams.REWARD_PERC) {
-				REWARD_PERC = uint16(values[i]);
-				continue;
-			}
-			if (paramNames[i] == UintParams.FLAT_ETH_FEE_PERC) {
-				FLAT_ETH_FEE_PERC = uint16(values[i]);
-				continue;
-			}
-			if (paramNames[i] == UintParams.INCIDENT_TOKEN_WEIGHT_PERC) {
-				INCIDENT_TOKEN_WEIGHT_PERC = uint8(values[i]);
-				continue;
-			}
-			if (paramNames[i] == UintParams.VOTING_PERIOD_DAYS_MIN) {
-				VOTING_PERIOD_DAYS_MIN = uint8(values[i]);
-				continue;
-			}
-			if (paramNames[i] == UintParams.VOTING_PERIOD_DAYS_MAX) {
-				VOTING_PERIOD_DAYS_MAX = uint8(values[i]);
-				continue;
-			}
-			if (paramNames[i] == UintParams.PAYOUT_COOLDOWN_DAYS) {
-				PAYOUT_COOLDOWN_DAYS = uint8(values[i]);
-				continue;
-			}
-		}
+    for (uint i = 0; i < paramNames.length; i++) {
+      if (paramNames[i] == UintParams.REWARD_PERC) {
+        REWARD_PERC = uint16(values[i]);
+        continue;
+      }
+      if (paramNames[i] == UintParams.FLAT_ETH_FEE_PERC) {
+        FLAT_ETH_FEE_PERC = uint16(values[i]);
+        continue;
+      }
+      if (paramNames[i] == UintParams.INCIDENT_TOKEN_WEIGHT_PERC) {
+        INCIDENT_TOKEN_WEIGHT_PERC = uint8(values[i]);
+        continue;
+      }
+      if (paramNames[i] == UintParams.VOTING_PERIOD_DAYS_MIN) {
+        VOTING_PERIOD_DAYS_MIN = uint8(values[i]);
+        continue;
+      }
+      if (paramNames[i] == UintParams.VOTING_PERIOD_DAYS_MAX) {
+        VOTING_PERIOD_DAYS_MAX = uint8(values[i]);
+        continue;
+      }
+      if (paramNames[i] == UintParams.PAYOUT_COOLDOWN_DAYS) {
+        PAYOUT_COOLDOWN_DAYS = uint8(values[i]);
+        continue;
+      }
+    }
   }
 
   /* ========== EVENTS ========== */
