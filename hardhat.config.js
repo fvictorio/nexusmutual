@@ -19,7 +19,7 @@ module.exports = {
       blockGasLimit: 12e6,
       gas: 12e6,
       accounts: {
-        count: 52,
+        count: 21,
       },
     },
 
