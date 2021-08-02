@@ -12,6 +12,34 @@ const {
 // [warning]: Don't use keccak256 from ethers because it returns a different type than what
 // merkletreejs expects.
 const keccak256 = require('keccak256');
+const formatPage = (page) => page.map(item => {
+
+  const {
+    id,
+    productId,
+    coverId,
+    amount,
+    coverStart,
+    coverEnd,
+    voteStart,
+    voteEnd,
+    claimStatus,
+    payoutStatus,
+    assetSymbol,
+  } = item;
+  return {
+    id: formatUnits(id, 0),
+    productId: formatUnits(productId, 0),
+    coverId: formatUnits(coverId, 0),
+    amount: formatUnits(amount) + ' ' + assetSymbol,
+    coverStart: formatUnits(coverStart, 0),
+    coverEnd: formatUnits(coverEnd, 0),
+    voteStart: formatUnits(voteStart, 0),
+    voteEnd: formatUnits(voteEnd, 0),
+    claimStatus,
+    payoutStatus,
+  };
+});
 describe('Assessment', function () {
 
   let nxm, assessment;
@@ -34,11 +62,11 @@ describe('Assessment', function () {
     const COVER_AMOUNT = parseEther('0.04'); // ETH ~ 100DAI
     const SUBMISSION_FEE = parseEther('0.05');
     const GAS_PRICE = '100';
-    const CLAIMS_PER_ATTACKER = 17;
+    const CLAIMS_PER_ATTACKER = 1;
     const CLAIMANT_ATTACKERS = 10;
     const CLAIM_COUNT = CLAIMANT_ATTACKERS * CLAIMS_PER_ATTACKER;
     const VOTE_COUNT = CLAIM_COUNT * attackers.length;
-    // const attackerAddresses = Array(1000).fill(0).map((_, i) => '0xa' + ((i + 1).toString().padStart(40 - 1, 0)));
+
     let gasSpentByAttacker = ethers.constants.Zero;
     let submissionFeesSpentByAttacker = ethers.constants.Zero;
     let coverPremiumsPaidByAttacker = ethers.constants.Zero;
@@ -85,7 +113,9 @@ describe('Assessment', function () {
       // Cover id is irrelevant for now
       const coverId = 0;
       return Array(CLAIMS_PER_ATTACKER).fill(0).map(() => {
-        return assessment.connect(attacker).submitClaimForAssessment(coverId, COVER_AMOUNT, { value: SUBMISSION_FEE });
+        return assessment.connect(attacker).submitClaimForAssessment(
+          coverId, COVER_AMOUNT, false, '', { value: SUBMISSION_FEE },
+        );
       });
     }).reduce((acc, x) => { return [...acc, ...x]; }, []);
     const submitClaimForAssessmentTxsSent = await Promise.all(submitClaimForAssessmentTxs);
@@ -117,6 +147,11 @@ describe('Assessment', function () {
       coverPremiumsPaidByAttacker: formatEther(coverPremiumsPaidByAttacker) + ' ETH',
       potentialGainsOfAttacker: formatEther(potentialGainsOfAttacker) + ' ETH',
     });
+    {
+      const page1 = await assessment.getClaimsToDisplay(0, 4);
+      const page2 = await assessment.getClaimsToDisplay(5, 9);
+      console.log({ page1: formatPage(page1), page2: formatPage(page2) });
+    }
 
     /* ========== BURN ========== */
     let gasSpentByAB = ethers.constants.Zero;
@@ -165,19 +200,16 @@ describe('Assessment', function () {
         const proof = merkleTree.getHexProof(
           keccak256(getLeafInput(attackers[i].address, CLAIM_COUNT, 1, 0)),
         );
-        const tx = await assessment.connect(owner).burnFraud(
-          attackers[i].address,
-          CLAIM_COUNT,
-          1,
-          0,
-          batchSize,
-          0,
-          proof,
-        );
+        const tx = await assessment.connect(owner)
+          .burnFraud(0, proof, attackers[i].address, CLAIM_COUNT, 1, 0, batchSize);
         const receipt = await tx.wait();
         gasSpentByAB = gasSpentByAB.add(receipt.gasUsed);
       }
     }
+
+    const page1 = await assessment.getClaimsToDisplay(0, 4);
+    const page2 = await assessment.getClaimsToDisplay(5, 9);
+    console.log({ page1: formatPage(page1), page2: formatPage(page2) });
 
     console.log({
       gasSpentByAB: formatUnits(gasSpentByAB.add(governanceGasCosts.toString()).mul(GAS_PRICE), 9) + ' ETH',

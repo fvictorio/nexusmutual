@@ -3,7 +3,7 @@
 pragma solidity ^0.8.0;
 
 import "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
-import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "hardhat/console.sol";
 
 /**
@@ -40,12 +40,12 @@ contract Assessments {
   /**
    *  Holds data for a vote belonging to an assessor.
    *
-   *  @dev This structure has snapshots of claim-time states that are considered moving targets
-   *  but also parts of cover details that reduce the need of external calls. Everything is fitted
-   *  in a single word that contains:
+   *  @dev This structure is used to keep track of user's votes. Each vote is used to determine
+   *  a user's share of rewards or to create a fraud resolution which excludes fraudulent votes
+   * from the initial poll.
    *
-   *  @param accepted     If the assessor voted to accept the event it's true otherwise it's false
    *  @param eventId      Can be either a claimId or an IncidentId
+   *  @param accepted     If the assessor voted to accept the event it's true otherwise it's false
    *  @param timestamp    Date and time when the vote was cast
    *  @param tokenWeight  How many tokens were staked when the vote was cast
    *  @param eventType    Can be a claim or an incident (See EventType enum)
@@ -107,6 +107,32 @@ contract Assessments {
     uint16 misc;
   }
 
+  struct Claim {
+    Poll poll;
+    ClaimDetails details;
+  }
+
+  /**
+   *  Claim but in a human-friendly format.
+   *
+   *  @dev Contains aggregated values that give an overall view about the claim and other relevant
+   *  pieces of information such as cover period, asset symbol. This structure is not used for
+   *  storage variables.
+   */
+  struct ClaimDisplay {
+    uint id;
+    uint productId;
+    uint coverId;
+    uint amount;
+    string assetSymbol;
+    uint coverStart;
+    uint coverEnd;
+    uint voteStart;
+    uint voteEnd;
+    string claimStatus;
+    string payoutStatus;
+  }
+
   struct IncidentDetails {
     uint104 activeCoverAmount; // ETH or DAI
     uint24 productId;
@@ -117,11 +143,6 @@ contract Assessments {
   struct Incident {
     Poll poll;
     IncidentDetails details;
-  }
-
-  struct Claim {
-    Poll poll;
-    ClaimDetails details;
   }
 
   struct FraudResolution {
@@ -138,7 +159,7 @@ contract Assessments {
 
   /* ========== STATE VARIABLES ========== */
 
-  ERC20 public nxm;
+  IERC20 public nxm;
   address public DAI_ADDRESS;
   uint16 public REWARD_PERC;
   uint16 public FLAT_ETH_FEE_PERC;
@@ -162,7 +183,7 @@ contract Assessments {
 
   constructor (address _nxm) {
 
-    nxm = ERC20(_nxm);
+    nxm = IERC20(_nxm);
 
     // The minimum cover premium is 2.6%
     // 20% of the cover premium is:
@@ -179,18 +200,15 @@ contract Assessments {
   }
   /* ========== VIEWS ========== */
 
-  function abs(int x)
-  internal pure returns (int) {
+  function abs(int x) internal pure returns (int) {
     return x >= 0 ? x : -x;
   }
 
-  function max(uint a, uint b)
-  internal pure returns (uint) {
+  function max(uint a, uint b) internal pure returns (uint) {
     return a >= b ? a : b;
   }
 
-  function min(uint a, uint b)
-  internal pure returns (uint) {
+  function min(uint a, uint b) internal pure returns (uint) {
     return a <= b ? a : b;
   }
 
@@ -276,27 +294,19 @@ contract Assessments {
     return _getVotingPeriodEnd(accepted, denied, voteStart, payoutImpact);
   }
 
-  function getEndOfCooldownPeriod (EventType eventType, uint104 id)
-  public view returns (uint32) {
+  function getEndOfCooldownPeriod (EventType eventType, uint104 id) public view returns (uint32) {
     return _getEndOfCooldownPeriod(getVotingPeriodEnd(eventType, id));
   }
 
-  function isInCooldownPeriod (EventType eventType, uint104 id)
-  public view returns (bool) {
+  function isInCooldownPeriod (EventType eventType, uint104 id) public view returns (bool) {
     return _blockTimestamp() > getEndOfCooldownPeriod(eventType, id);
   }
 
-  function hasVotingPeriodEnded (EventType eventType, uint104 id)
-  public view returns (bool) {
+  function hasVotingPeriodEnded (EventType eventType, uint104 id) public view returns (bool) {
     return _blockTimestamp() > getVotingPeriodEnd(eventType, id);
   }
 
-  function getPollStatus(EventType eventType, uint104 id)
-  public view returns (PollStatus) {
-    if (!hasVotingPeriodEnded(eventType, id)) {
-      return PollStatus.PENDING;
-    }
-
+  function getPollStatus(EventType eventType, uint104 id) public view returns (PollStatus) {
     FraudResolution memory fraudResolution = eventType == EventType.CLAIM
         ? fraudResolutionOfClaim[id]
         : fraudResolutionOfIncident[id];
@@ -306,33 +316,88 @@ contract Assessments {
         : PollStatus.DENIED;
     }
 
+    if (!hasVotingPeriodEnded(eventType, id)) {
+      return PollStatus.PENDING;
+    }
+
+
     Poll memory poll = eventType == EventType.CLAIM
         ? claims[id].poll
         : incidents[id].poll;
     return poll.accepted > poll.denied ? PollStatus.ACCEPTED : PollStatus.DENIED;
   }
 
-  function canWithdrawPayout (EventType eventType, uint104 id)
-  external view returns (bool) {
+  function canWithdrawPayout (EventType eventType, uint104 id) external view returns (bool) {
     return getPollStatus(eventType, id) == PollStatus.ACCEPTED && isInCooldownPeriod(eventType, id);
   }
 
-  // @dev Meant to be used by the UI to load paged claims
-  // [todo]
-  function getClaims (uint from, uint to) external view returns (
-    uint id,
-    uint productId,
-    uint coverId,
-    uint coverAmount,
-    uint coverStart,
-    uint coverEnd,
-    uint voteStart,
-    uint voteEnd,
-    string memory claimStatus,
-    string memory payoutStatus
-  ) {
-      return (0, 0, 0, 0, 0, 0, 0, 0, 'PENDING', 'PENDING');
 
+  /**
+   *  Returns claims aggregated in a human-friendly format.
+   *
+   *  @dev This view is meant to be used in user interfaces to get claims in a format suitable for
+   *  displaying all relevant information in as few calls as possible. It can be used to paginate
+   *  claims by providing the following paramterers:
+   *
+   *  @param from  First claim identifier from the requested range
+   *  @param to    Last claim identifier from the requested range
+   */
+  function getClaimsToDisplay (uint104 from, uint104 to) external view
+  returns (ClaimDisplay[] memory) {
+    ClaimDisplay[] memory claimDisplays = new ClaimDisplay[](to-from+1);
+    for (uint104 claimId = from; claimId <= to; claimId++) {
+      Claim memory claim = claims[claimId];
+      string memory claimStatusDisplay;
+      string memory payoutStatusDisplay;
+      {
+        PollStatus claimStatus = getPollStatus(EventType.CLAIM, claimId);
+        if (claimStatus == PollStatus.ACCEPTED) {
+          claimStatusDisplay = "Accepted";
+        } else if (claimStatus == PollStatus.DENIED) {
+          claimStatusDisplay = "Denied";
+        } else if (claimStatus == PollStatus.PENDING) {
+          claimStatusDisplay = "Pending";
+        }
+
+        bool payoutComplete = _isClaimPayoutComplete(claim.details);
+
+        if (claimStatus == PollStatus.DENIED) {
+          payoutStatusDisplay = "Denied";
+        } else if (claimStatus == PollStatus.ACCEPTED && payoutComplete) {
+          payoutStatusDisplay = "Complete";
+        } else {
+          payoutStatusDisplay = "Pending";
+        }
+      }
+      // [todo] Get from covers contract
+      uint coverStart = block.timestamp;
+      uint coverPeriod = 365;
+      uint coverEnd = coverStart + coverPeriod * 1 days;
+      uint productId = 1;
+      uint voteEnd = getVotingPeriodEnd(EventType.CLAIM, claimId);
+      string memory assetSymbol;
+      {
+        if (claim.details.asset == Asset.ETH) {
+          assetSymbol = "ETH";
+        } else if (claim.details.asset == Asset.DAI) {
+          assetSymbol = "DAI";
+        }
+      }
+      claimDisplays[claimId - from] = ClaimDisplay(
+        claimId,
+        productId,
+        claim.details.coverId,
+        claim.details.amount,
+        assetSymbol,
+        coverStart,
+        coverEnd,
+        claim.poll.voteStart,
+        voteEnd,
+        claimStatusDisplay,
+        payoutStatusDisplay
+      );
+    }
+    return claimDisplays;
   }
 
   function getSubmissionFee()
@@ -340,14 +405,33 @@ contract Assessments {
     return 1 ether * uint(FLAT_ETH_FEE_PERC) / uint(PERC_BASIS_POINTS);
   }
 
+  /* === MUTATIVE FUNCTIONS ==== */
+
   function _setClaimPayoutComplete (ClaimDetails storage details) internal {
     // One way operation.
     uint16 flipPosition = 1 << 15;
     details.misc = details.misc | flipPosition;
   }
 
-  function submitClaimForAssessment(uint24 coverId, uint104 requestedAmount)
-  external payable {
+  /**
+   *  Submits a claim for assessment
+   *
+   *  @dev This function requires an ETH submission fee. See: getSubmissionFee()
+   *
+   *  @param coverId          Cover identifier
+   *  @param requestedAmount  The amount expected to be received at payout
+   *  @param withProof        When true, a ProofSubmitted event is emitted with ipfsProofHash.
+   *                          When false, no ProofSubmitted event is emitted to save gas if the
+   *                          cover wording doesn't enforce a proof of loss.
+   *  @param ipfsProofHash    The IPFS hash required for proof of loss. It is ignored if withProof
+   *                          is false
+   */
+  function submitClaimForAssessment(
+    uint24 coverId,
+    uint104 requestedAmount,
+    bool withProof,
+    string calldata ipfsProofHash
+  ) external payable {
     require(
       msg.value == getSubmissionFee(),
       "Assessment: Submission fee different that the expected value"
@@ -361,6 +445,9 @@ contract Assessments {
     require(coverPeriod <= 2**11-1, "Assessment: Cover period cannot exceed 2047 days");
 
     // a snapshot of FLAT_ETH_FEE_PERC at submission if it ever changes before redeeming
+    if (withProof) {
+      emit ProofSubmitted(coverId, msg.sender, ipfsProofHash);
+    }
     claims.push(Claim(
       Poll(0,0,_blockTimestamp()),
       ClaimDetails(
@@ -372,7 +459,6 @@ contract Assessments {
         coverPeriod
       )
     ));
-
   }
 
   function submitIncidentForAssessment(uint24 productId, uint112 priceBefore)
@@ -507,20 +593,19 @@ contract Assessments {
     return keccak256(abi.encodePacked(account, lastFraudulentVoteIndex, burnAmount, fraudCount));
   }
 
-  function submitFraud (bytes32 root)
-  public {
+  function submitFraud (bytes32 root) public {
     // [todo] AB only
     fraudMerkleRoots.push(root);
   }
 
   function burnFraud (
+    uint256 rootIndex,
+    bytes32[] calldata proof,
     address fraudulentAssessor,
     uint256 lastFraudulentVoteIndex,
     uint104 burnAmount,
     uint16 fraudCount,
-    uint256 voteBatchSize,
-    uint256 rootIndex,
-    bytes32[] calldata proof
+    uint256 voteBatchSize
   ) external {
     uint32 blockTimestamp = _blockTimestamp();
     uint voteCount = votesOf[fraudulentAssessor].length;
@@ -599,7 +684,6 @@ contract Assessments {
       }
     }
 
-
     if (fraudCount == stake.fraudCount) {
       // Burns an assessor only once for each merkle root, no matter how many times this function
       // runs on the same account. When a transaction is too big to fit in one block, it is batched
@@ -613,8 +697,7 @@ contract Assessments {
     stake.voteRewardCursor = uint104(processUntil);
   }
 
-  function updateUintParameters (UintParams[] calldata paramNames, uint[] calldata values)
-  external
+  function updateUintParameters (UintParams[] calldata paramNames, uint[] calldata values) external
   {
     for (uint i = 0; i < paramNames.length; i++) {
       if (paramNames[i] == UintParams.REWARD_PERC) {
@@ -649,6 +732,7 @@ contract Assessments {
   event StakeDeposited(address user, uint256 amount);
   event ClaimSubmitted(address user, uint32 coverId, uint24 productId);
   event IncidentSubmitted(address user, uint24 productId);
+  event ProofSubmitted(uint indexed coverId, address indexed owner, string ipfsHash);
   event VoteCast(address indexed user, uint256 tokenWeight, bool accepted);
   event RewardWithdrawn(address user, uint256 amount);
   event StakeWithdrawn(address indexed user, uint256 amount);
