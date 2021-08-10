@@ -5,15 +5,16 @@ pragma solidity ^0.8.0;
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "hardhat/console.sol";
 
-contract StakingPool is ERC20 {
+contract StakingPoolRPT is ERC20 {
 
   // RPT = reward per token
 
   struct Bucket {
-    uint rewardsToReduce;
+    uint rewardReduction;
     uint rptCumulativeSnapshot;
-    uint sharesToUnstake;
+    uint balanceToUnstake;
     uint nxmUnstaked;
+    uint capacityIncrease;
   }
 
   struct Staker {
@@ -28,7 +29,13 @@ contract StakingPool is ERC20 {
   uint public pendingRewards;
 
   // reward to be distributed in the current bucket
-  uint public currentBucketReward;
+  uint public currentReward;
+
+  // currently active cover amount
+  uint public capacityUsed;
+
+  // currently active or in grace period
+  uint public capacityReserved;
 
   // currently unstaked nxm
   uint public unstakedAmount;
@@ -70,7 +77,7 @@ contract StakingPool is ERC20 {
     // cheaper to have them on stack
     uint _rptCumulative = rptCumulative;
     uint _rptLastUpdateTime = rptLastUpdateTime;
-    uint _currentBucketReward = currentBucketReward;
+    uint _currentBucketReward = currentReward;
     uint _pendingRewards = pendingRewards;
     uint _unstakedAmount = unstakedAmount;
 
@@ -86,7 +93,7 @@ contract StakingPool is ERC20 {
 
       if (supply == 0) {
 
-        _currentBucketReward -= buckets[currentBucket].rewardsToReduce;
+        _currentBucketReward -= buckets[currentBucket].rewardReduction;
         _rptLastUpdateTime = bucketCrossTime;
 
         if (_rptCumulative != 0) {
@@ -107,21 +114,21 @@ contract StakingPool is ERC20 {
         buckets[currentBucket].rptCumulativeSnapshot = _rptCumulative;
       }
 
-      uint sharesToUnstake = buckets[currentBucket].sharesToUnstake;
+      uint balanceToUnstake = buckets[currentBucket].balanceToUnstake;
 
-      if (sharesToUnstake != 0) {
+      if (balanceToUnstake != 0) {
 
-        // calc unstaked amount and burn unstaked shares
+        // calc unstaked amount and burn unstaked balance
         uint nxmBalance = nxm.balanceOf(address(this));
         uint stakedNXM = nxmBalance - _pendingRewards - _unstakedAmount;
-        uint nxmToUnstake = sharesToUnstake * stakedNXM / supply;
+        uint nxmToUnstake = balanceToUnstake * stakedNXM / supply;
 
-        _burn(address(this), sharesToUnstake);
+        _burn(address(this), balanceToUnstake);
         _unstakedAmount += nxmToUnstake;
         buckets[currentBucket].nxmUnstaked = nxmToUnstake;
       }
 
-      _currentBucketReward -= buckets[currentBucket].rewardsToReduce;
+      _currentBucketReward -= buckets[currentBucket].rewardReduction;
     }
 
     uint supply = totalSupply();
@@ -138,7 +145,7 @@ contract StakingPool is ERC20 {
     lastCrossedBucket = currentBucket;
     rptCumulative = _rptCumulative;
     rptLastUpdateTime = _rptLastUpdateTime;
-    currentBucketReward = _currentBucketReward;
+    currentReward = _currentBucketReward;
     unstakedAmount = _unstakedAmount;
     pendingRewards = _pendingRewards;
   }
@@ -159,8 +166,8 @@ contract StakingPool is ERC20 {
     nxm.transferFrom(msg.sender, address(this), premium);
 
     pendingRewards += premium;
-    currentBucketReward += amountPerBucket;
-    buckets[currentBucket + numBuckets].rewardsToReduce = amountPerBucket;
+    currentReward += amountPerBucket;
+    buckets[currentBucket + numBuckets].rewardReduction = amountPerBucket;
   }
 
   function deposit(uint amount) external {
@@ -172,12 +179,12 @@ contract StakingPool is ERC20 {
     nxm.transferFrom(msg.sender, address(this), amount);
 
     Staker storage staker = stakers[msg.sender];
-    uint shares = balanceOf(msg.sender);
+    uint balance = balanceOf(msg.sender);
     uint _rptCumulative = rptCumulative;
 
-    if (shares != 0) {
+    if (balance != 0) {
       uint rptUnpaid = _rptCumulative - staker.rptCumulativePaid;
-      uint newEarnings = rptUnpaid * shares;
+      uint newEarnings = rptUnpaid * balance;
       staker.earned += newEarnings;
     }
 
@@ -185,8 +192,8 @@ contract StakingPool is ERC20 {
     staker.rptCumulativePaid = _rptCumulative;
 
     uint supply = totalSupply();
-    uint newShares = supply == 0 ? amount : (amount / stakedNXM * supply);
-    _mint(msg.sender, newShares);
+    uint mintAmount = supply == 0 ? amount : (amount / stakedNXM * supply);
+    _mint(msg.sender, mintAmount);
   }
 
 }
