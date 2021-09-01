@@ -139,7 +139,7 @@ describe('Master upgrade', function () {
   it('upgrade contracts', async function () {
     const { master, voters, governance, incidents, mcr } = this;
 
-    const newMaster = await NXMaster.new();
+    const newMaster = await NXMaster.at('0xffd3dacf5a877e50367c8536a5254273f2ff0246');
 
     const newIncidents = await Incidents.at('0xb197503361E4618078C467EDb618E38548Cdb256');
     const newClaimsReward = await ClaimsReward.at('0x15671e5710e6e8f087939f8dbb6707bc4b5c64a9');
@@ -191,10 +191,12 @@ describe('Master upgrade', function () {
     assert.equal(mcrFloor.toString(), previousMcrFloor.toString());
 
     console.log('initialize master');
-    await master.initialize();
+    await master.initializeEmergencyAdmin();
 
     const initializedEmergencyAdmin = await master.emergencyAdmin();
     assert.equal(initializedEmergencyAdmin, '0x422D71fb8040aBEF53f3a05d21A9B85eebB2995D');
+
+    assert.equal();
 
     this.mcr = newMCR;
     this.claims = claims;
