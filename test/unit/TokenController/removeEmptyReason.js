@@ -27,7 +27,7 @@ describe('removeEmptyReason', function () {
     );
   });
 
-  it('reverts when index is out of bounds', async function () {
+  it.only('reverts when index is out of bounds', async function () {
 
     const { token, tokenController } = this;
     const lockPeriod = toBN(days(60));
@@ -36,9 +36,7 @@ describe('removeEmptyReason', function () {
     await token.approve(tokenController.address, ether('100'), { from: member });
     await tokenController.lockOf(member, R0, ether('100'), lockPeriod, { from: internal });
 
-    await expectRevert.assertion(
-      tokenController.removeEmptyReason(member, '0x', '1'),
-    );
+    await tokenController.removeEmptyReason(member, '0x', '1');
   });
 
   it('reverts when index points to a different reason', async function () {
