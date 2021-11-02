@@ -654,6 +654,7 @@ contract TokenController is ITokenController, LockHandler, LegacyMasterAware {
   function _removeEmptyReason(address _of, bytes32 _reason, uint _index) internal {
 
     uint lastReasonIndex = lockReason[_of].length.sub(1, "TokenController: lockReason is empty");
+    require(lastReasonIndex >= _index, "TokenController: bad reason index");
 
     require(lockReason[_of][_index] == _reason, "TokenController: bad reason index");
     require(locked[_of][_reason].amount == 0, "TokenController: reason amount is not zero");
