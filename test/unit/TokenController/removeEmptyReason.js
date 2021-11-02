@@ -36,7 +36,10 @@ describe('removeEmptyReason', function () {
     await token.approve(tokenController.address, ether('100'), { from: member });
     await tokenController.lockOf(member, R0, ether('100'), lockPeriod, { from: internal });
 
-    await tokenController.removeEmptyReason(member, '0x', '1');
+    await expectRevert(
+      tokenController.removeEmptyReason(member, '0x', '1'),
+      'TokenController: bad reason index',
+    );
   });
 
   it('reverts when index points to a different reason', async function () {
